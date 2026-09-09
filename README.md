@@ -1,187 +1,355 @@
-StreamLite
+# StreamLite
 
-StreamLite is a C++17 real-time media and WebRTC project focused on low-latency audio/video transport, RTP packet processing, network resilience, and peer-to-peer communication.
+StreamLite is a C++17 project for exploring the internals of real-time audio and video communication using WebRTC.
 
-The project explores the lower-level components involved in establishing and maintaining WebRTC sessions, including SDP negotiation, ICE/STUN connectivity, secure RTP transport, packetization, jitter buffering, retransmission, and bandwidth estimation.
+The project focuses on the lower-level systems involved in establishing and maintaining real-time media sessions, including SDP negotiation, ICE/STUN connectivity, RTP/RTCP transport, secure media communication, jitter buffering, packet-loss recovery, and bandwidth estimation.
 
-Features
+The goal of StreamLite is to explore how real-time communication systems behave under practical network conditions such as latency, jitter, packet loss, and changing bandwidth.
 
-WebRTC Connectivity
+---
 
-StreamLite includes the core components required for establishing WebRTC connections:
+## Features
 
-* SDP offer generation and answer parsing
-* ICE candidate discovery and negotiation
-* STUN connectivity checks
-* DTLS negotiation
-* SRTP/SRTCP media protection
-* IPv4 and IPv6 networking
-* Peer connection state management
+### WebRTC Connectivity
 
-The main peer connection logic is implemented through the PeerConnection abstraction.
+StreamLite contains the core components required to establish and maintain WebRTC connections, including:
 
-Real-Time Media Transport
+- SDP offer generation and answer parsing
+- ICE negotiation
+- STUN connectivity checks
+- DTLS negotiation
+- SRTP and SRTCP
+- IPv4 and IPv6 networking
+- Peer connection state management
+- Multiple media tracks
+- WebRTC data channels
 
-The media pipeline handles RTP/RTCP communication for real-time audio and video.
+The `PeerConnection` abstraction coordinates connection establishment and media transport.
 
-Implemented components include:
+---
 
-* RTP packet generation and parsing
-* RTCP sender and receiver reports
-* RTP sequence tracking
-* Media packetization
-* Media depacketization
-* Packet retransmission support
-* RTP timestamp handling
-* Track-level statistics
+## Real-Time Media Transport
 
-Audio and Video Codecs
+StreamLite handles real-time media using RTP and RTCP.
 
-The project contains packetization/depacketization support for several commonly used real-time media formats.
+The media pipeline includes:
 
-Video
-
-* VP8
-* VP9
-* H.264
-* H.265
-* AV1
-
-Audio
-
-* Opus
-
-Media encoding and decoding are kept separate from the transport layer. The WebRTC layer operates primarily on encoded media frames and handles their conversion to and from RTP packets.
-
-Jitter Buffer
-
-One of the important components of StreamLite is its receive-side jitter buffer.
-
-Real-time networks can cause packets to:
-
-* Arrive late
-* Arrive out of order
-* Arrive with inconsistent timing
-* Become lost in transit
-
-The jitter buffer temporarily holds incoming RTP packets so that media frames can be reconstructed in the correct order.
-
-Conceptually:
-
-Network
-   |
-   v
-RTP Receiver
-   |
-   v
-+------------------+
-|   Jitter Buffer  |
-|                  |
-| Sequence 101     |
-| Sequence 102     |
-| Sequence 104     |
-+------------------+
-   |
-   v
-Depacketizer
-   |
-   v
-Encoded Media Frame
-   |
-   v
-Application
-
-This introduces an important real-time systems trade-off:
-
-larger buffer → greater tolerance to jitter but higher latency
-
-smaller buffer → lower latency but greater sensitivity to network variation
-
-The implementation therefore balances playback stability against real-time responsiveness.
-
-Packet Loss and Retransmission
-
-StreamLite contains mechanisms for handling packet loss during real-time communication.
-
-The receive pipeline can identify missing RTP packets and use RTCP feedback mechanisms such as NACK to request retransmission.
-
-RTX can be used when negotiated between peers.
-
-The send side maintains RTP packet history so packets can be retransmitted when required.
-
-Bandwidth Estimation
-
-The project includes Transport-Wide Congestion Control (TWCC) components for estimating network conditions.
-
-TWCC feedback can be used to observe packet delivery behavior and adapt sending decisions based on available network capacity.
-
-Related components include:
-
-twcc_publish
-twcc_subscribe
-rtp_responder_twcc
-send_pacer
-
-Simulcast
-
-StreamLite contains support for multiple video layers through simulcast.
-
-Different versions of a video stream can be transmitted at different resolutions or bitrates, allowing the receiver or media infrastructure to select an appropriate layer according to network conditions.
-
-Data Channels
-
-In addition to audio and video transport, the project contains SCTP and WebRTC data-channel functionality.
-
-This allows arbitrary application data to be exchanged alongside media.
-
-Architecture
+- RTP packet generation and parsing
+- RTCP sender reports
+- RTCP receiver reports
+- RTP sequence tracking
+- Audio/video packetization
+- Audio/video depacketization
+- Packet retransmission
+- RTP timestamp handling
+- Media-track statistics
 
 At a high level:
 
+```text
+Encoded Media
+     |
+     v
+ Packetizer
+     |
+     v
+ RTP Packets
+     |
+     v
+ DTLS / SRTP
+     |
+     v
+ UDP Network
+     |
+     v
+ SRTP / RTP
+     |
+     v
+ Jitter Buffer
+     |
+     v
+ Depacketizer
+     |
+     v
+Encoded Media Frame
+```
+
+---
+
+## Supported Media Formats
+
+The project contains RTP packetization and depacketization support for several commonly used media codecs.
+
+### Video
+
+- VP8
+- VP9
+- H.264
+- H.265
+- AV1
+
+### Audio
+
+- Opus
+
+Media encoding and decoding are kept outside the core transport layer. StreamLite primarily works with encoded media frames and handles their transport through RTP.
+
+---
+
+## Jitter Buffer
+
+One of the important components of StreamLite is the receive-side jitter buffer.
+
+Packets transmitted over a real network do not necessarily arrive at perfectly consistent intervals.
+
+They may:
+
+- Arrive late
+- Arrive out of order
+- Be temporarily delayed
+- Be lost completely
+
+The jitter buffer temporarily stores incoming RTP packets before reconstructing the corresponding media frame.
+
+```text
+             Network
+                |
+                v
+          RTP Receiver
+                |
+                v
+      +-------------------+
+      |   Jitter Buffer   |
+      |-------------------|
+      | Sequence 101      |
+      | Sequence 102      |
+      | Sequence 104      |
+      +-------------------+
+                |
+                v
+          Depacketizer
+                |
+                v
+       Encoded Media Frame
+                |
+                v
+           Application
+```
+
+This introduces an important trade-off in real-time systems.
+
+A larger buffer can tolerate more network variation but introduces additional latency.
+
+A smaller buffer reduces latency but makes playback more sensitive to jitter.
+
+The objective is therefore to balance **responsiveness and media stability**.
+
+---
+
+## Packet Loss and Retransmission
+
+Packet loss is unavoidable on some real-world networks.
+
+StreamLite contains mechanisms for detecting and recovering from missing RTP packets.
+
+The receive side can identify gaps in RTP sequence numbers and generate feedback requesting retransmission.
+
+The project includes support for:
+
+- NACK feedback
+- RTX retransmission
+- Packet history
+- Packet-loss detection
+- Key-frame requests
+- RTCP feedback
+
+When retransmission is appropriate, previously transmitted RTP packets can be resent to the receiver.
+
+For real-time communication, recovery also needs to consider latency: waiting too long for a missing packet can be worse than continuing playback.
+
+---
+
+## ICE and STUN
+
+Before media can flow between peers, StreamLite must determine how the peers can communicate over the network.
+
+ICE coordinates candidate discovery and connectivity checks, while STUN assists with discovering network addressing information when peers are behind NAT.
+
+Conceptually:
+
+```text
+Peer A
+   |
+   | ICE Candidates
+   v
+ICE / STUN Negotiation
+   ^
+   | ICE Candidates
+   |
+Peer B
+```
+
+After connectivity has been established, the selected transport path can be used for real-time media communication.
+
+---
+
+## SDP Negotiation
+
+SDP is used to describe the capabilities of each peer.
+
+StreamLite contains components for:
+
+- Generating SDP offers
+- Parsing SDP answers
+- Negotiating codecs
+- Negotiating media tracks
+- Negotiating RTP extensions
+- Configuring transport parameters
+
+This allows two WebRTC endpoints to agree on how audio, video, and data will be exchanged.
+
+---
+
+## Secure Media Transport
+
+Real-time media is protected using WebRTC's secure transport mechanisms.
+
+The connection pipeline includes:
+
+```text
+ICE
+ |
+ v
+DTLS
+ |
+ v
+SRTP / SRTCP
+ |
+ v
+RTP / RTCP Media
+```
+
+DTLS establishes the cryptographic context used for secure RTP communication.
+
+SRTP protects the media packets while SRTCP protects RTCP control traffic.
+
+---
+
+## Bandwidth Estimation
+
+Real-time applications need to react when network capacity changes.
+
+StreamLite contains Transport-Wide Congestion Control components for observing packet-delivery behavior and estimating available bandwidth.
+
+Relevant components include:
+
+- TWCC publishing
+- TWCC receiving
+- Transport-wide sequence tracking
+- Send pacing
+- Bandwidth estimation
+- Network feedback processing
+
+This information can be used to make better media-sending decisions when network conditions change.
+
+---
+
+## Simulcast
+
+StreamLite contains support for simulcast.
+
+Simulcast allows multiple representations of the same video stream to be transmitted at different qualities.
+
+For example:
+
+```text
+Camera
+  |
+  +----> High Resolution
+  |
+  +----> Medium Resolution
+  |
+  +----> Low Resolution
+```
+
+A receiver or media infrastructure can then select an appropriate stream according to available bandwidth and device capabilities.
+
+---
+
+## Data Channels
+
+In addition to audio and video, the project contains WebRTC data-channel functionality.
+
+Data channels allow arbitrary application data to be transported alongside real-time media.
+
+The implementation includes SCTP-related components used for reliable data-channel communication.
+
+---
+
+## Architecture
+
+The high-level architecture is:
+
+```text
                     Application
                          |
                          v
                   PeerConnection
                          |
-          +--------------+--------------+
-          |                             |
-          v                             v
-     SDP / ICE                     Media Tracks
-          |                             |
-          v                    +--------+--------+
-      ICE Agent                |                 |
-          |                    v                 v
-          |               Packetizer       Depacketizer
-          |                    |                 ^
-          |                    v                 |
-          |                   RTP          Jitter Buffer
-          |                    |                 ^
-          +--------------------+-----------------+
-                               |
-                               v
-                         DTLS / SRTP
-                               |
-                               v
-                         UDP Network
+              +----------+----------+
+              |                     |
+              v                     v
+          SDP / ICE             Media Tracks
+              |                     |
+              v             +-------+-------+
+          ICE Agent         |               |
+              |             v               v
+              |        Packetizer      Depacketizer
+              |             |               ^
+              |             v               |
+              |            RTP        Jitter Buffer
+              |             |               ^
+              +-------------+---------------+
+                            |
+                            v
+                       DTLS / SRTP
+                            |
+                            v
+                       UDP Network
+```
 
-The PeerConnection coordinates negotiation and connectivity, while the media pipeline handles packetization, transport, buffering, and reconstruction of encoded media.
+`PeerConnection` acts as the main coordination layer.
 
-Project Structure
+It brings together:
 
+- SDP negotiation
+- ICE connectivity
+- Transport security
+- Media tracks
+- RTP/RTCP
+- Network feedback
+- Connection state
+
+---
+
+## Project Structure
+
+```text
 StreamLite/
-├── include/srtc/
-│   ├── peer_connection.h
-│   ├── ice_agent.h
-│   ├── jitter_buffer.h
-│   ├── rtp_packet.h
-│   ├── rtcp_packet.h
-│   ├── packetizer*.h
-│   ├── depacketizer*.h
-│   ├── srtp*.h
-│   ├── sdp_offer.h
-│   ├── sdp_answer.h
-│   ├── twcc*.h
-│   └── ...
+├── include/
+│   └── srtc/
+│       ├── peer_connection.h
+│       ├── ice_agent.h
+│       ├── jitter_buffer.h
+│       ├── rtp_packet.h
+│       ├── rtcp_packet.h
+│       ├── sdp_offer.h
+│       ├── sdp_answer.h
+│       ├── packetizer*.h
+│       ├── depacketizer*.h
+│       ├── srtp*.h
+│       ├── twcc*.h
+│       └── ...
 │
 ├── src/
 │   ├── peer_connection.cpp
@@ -189,72 +357,117 @@ StreamLite/
 │   ├── jitter_buffer.cpp
 │   ├── rtp_packet.cpp
 │   ├── rtcp_packet.cpp
+│   ├── sdp_offer.cpp
+│   ├── sdp_answer.cpp
 │   ├── packetizer*.cpp
 │   ├── depacketizer*.cpp
 │   ├── srtp*.cpp
-│   ├── sdp_offer.cpp
-│   ├── sdp_answer.cpp
 │   ├── twcc*.cpp
 │   ├── sctp/
 │   └── stun/
 │
-├── tools/
 ├── test/
+├── tools/
 ├── pion-webrtc-examples-whip-whep/
 ├── CMakeLists.txt
 └── LICENSE.txt
+```
 
-Building
+---
+
+## Building
 
 StreamLite uses CMake.
 
-Configure the project:
+### Configure
 
+```bash
 cmake -S . -B build
+```
 
-Build:
+### Compile
 
+```bash
 cmake --build build
+```
 
-The resulting binaries and tools are generated inside the build directory.
+---
 
-Testing Network Conditions
+## Testing Network Conditions
 
-Real-time communication systems should be tested under imperfect network conditions.
+Real-time communication should be tested under imperfect network conditions rather than only on a stable local network.
 
-On Linux, tc/netem can simulate latency, jitter, and packet loss.
+On Linux, `tc/netem` can be used to introduce artificial network degradation.
 
-Example:
+For example:
 
+```bash
 sudo tc qdisc add dev lo root netem delay 50ms 20ms loss 2%
+```
 
-Remove the configuration with:
+This introduces:
 
+- Base network delay
+- Variable packet delay
+- Packet loss
+
+The configuration can be removed with:
+
+```bash
 sudo tc qdisc del dev lo root
+```
 
-This is useful for evaluating jitter-buffer behavior, retransmission, and media stability under degraded network conditions.
+This type of testing is useful for studying:
 
-Key Engineering Areas
+- Jitter-buffer behavior
+- Packet-loss recovery
+- Retransmission
+- Latency
+- Media stability
 
-StreamLite is useful for exploring several real-time systems concepts:
+---
 
-* WebRTC connection establishment
-* SDP negotiation
-* ICE/STUN
-* RTP and RTCP
-* SRTP/SRTCP
-* Audio/video packetization
-* Jitter buffering
-* Packet-loss recovery
-* NACK and RTX
-* Bandwidth estimation
-* TWCC
-* Simulcast
-* Data channels
-* Network programming
-* Event-driven C++
-* Low-latency media transport
+## Engineering Concepts Explored
 
-License
+StreamLite provides a practical environment for exploring:
 
-See LICENSE.txt for the licensing terms and retain any notices required for code derived from third-party/open-source components.
+- C++ network programming
+- WebRTC internals
+- SDP negotiation
+- ICE
+- STUN
+- DTLS
+- SRTP/SRTCP
+- RTP/RTCP
+- Audio/video packetization
+- Jitter buffering
+- Packet ordering
+- Packet loss
+- NACK
+- RTX
+- Bandwidth estimation
+- TWCC
+- Simulcast
+- Data channels
+- Concurrency
+- Low-latency systems
+
+---
+
+## Motivation
+
+Real-time communication behaves differently from traditional request-response applications.
+
+A normal backend request can often tolerate hundreds of milliseconds of additional processing without significantly affecting the user experience.
+
+In a real-time media system, however, relatively small delays can directly affect conversation quality.
+
+StreamLite is intended as a hands-on environment for understanding these trade-offs and exploring how WebRTC systems maintain responsive communication despite imperfect network conditions.
+
+---
+
+## License and Attribution
+
+StreamLite contains or is derived from open-source components. See `LICENSE.txt` and the applicable source-file notices for licensing and attribution requirements.
+
+Where code is derived from another project, the corresponding copyright and license notices should be retained.
