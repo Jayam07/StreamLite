@@ -1,0 +1,406 @@
+#include "srtc/codec_h264.h"
+#include "srtc/logging.h"
+#include "srtc/peer_connection.h"
+#include "srtc/sdp_answer.h"
+#include "srtc/sdp_offer.h"
+#include "srtc/util.h"
+
+#include "http_whip_whep.h"
+#include "media_reader.h"
+
+#include <cassert>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <string>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <Windows.h>
+#else
+#include <unistd.h>
+#endif
+
+class PublishDataChannelListener : public srtc::PeerConnection::DataChannelListener
+{
+public:
+    void onDataChannelOpened(const std::string& label) override
+    {
+        std::cout << "*** Data channel opened: \"" << label << "\"" << std::endl;
+    }
+    void onDataChannelClosed(const std::string& label) override
+    {
+        std::cout << "*** Data channel closed: \"" << label << "\"" << std::endl;
+    }
+    void onDataChannelReceivedText(const std::string& label, const std::string& data) override
+    {
+        std::cout << "*** Data channel text \"" << label << "\": \"" << data << "\"" << std::endl;
+    }
+    void onDataChannelReceivedBinary(const std::string& label, const srtc::ByteBuffer& data) override
+    {
+        std::cout << "*** Data channel binary \"" << label << "\": " << data.size() << " bytes" << std::endl;
+    }
+};
+
+// Program options
+
+static std::string gInputFile = "sintel.h264";
+static std::string gWhipUrl = "http://localhost:8080/whip";
+static std::string gAuthToken = "none";
+static bool gQuiet = false;
+static bool gPrintSDP = false;
+static bool gPrintInfo = false;
+static bool gEnableBWE = false;
+static bool gLoopVideo = false;
+static bool gDataChannels = false;
+static bool gAbsCaptureTime = false;
+
+// State
+
+static std::atomic_bool gIsConnectionFailed = false;
+static std::atomic_bool gIsConnectionClosed = false;
+
+const char* connectionStateToString(const srtc::PeerConnection::ConnectionState& state)
+{
+    switch (state) {
+    case srtc::PeerConnection::ConnectionState::Inactive:
+        return "inactive";
+    case srtc::PeerConnection::ConnectionState::Connecting:
+        return "connecting";
+    case srtc::PeerConnection::ConnectionState::Connected:
+        return "connected";
+    case srtc::PeerConnection::ConnectionState::Failed:
+        return "failed";
+    case srtc::PeerConnection::ConnectionState::Closed:
+        return "closed";
+    default:
+        return "?";
+    }
+}
+
+std::string generateText(size_t size)
+{
+    const std::string phrase = "the quick brown fox jumps over the lazy dog";
+    std::string result;
+    result.reserve(size);
+    while (result.size() < size) {
+        if (!result.empty())
+            result += ' ';
+        result += phrase;
+    }
+    return result;
+}
+
+void playVideoFile(const std::shared_ptr<srtc::PeerConnection>& peerConnection, const LoadedMedia& media)
+{
+    std::optional<int64_t> pts_usec;
+    uint32_t msg_seq = 0;
+
+    const auto trackList = peerConnection->getTrackList();
+    assert(trackList.size() == 1);
+
+    const auto track = trackList[0];
+
+    while (true) {
+        uint32_t frame_count = 0;
+
+        for (const auto& frame : media.frame_list) {
+            if (pts_usec.has_value()) {
+                const auto delta_usec = frame.pts_usec - pts_usec.value();
+                std::this_thread::sleep_for(std::chrono::microseconds(delta_usec));
+            }
+            pts_usec = frame.pts_usec;
+
+            if (!frame.csd.empty()) {
+                std::vector<srtc::ByteBuffer> csd_copy(frame.csd.size());
+                for (const auto& item : frame.csd) {
+                    csd_copy.push_back(item.copy());
+                }
+
+                peerConnection->setVideoCodecSpecificData(track, std::move(csd_copy));
+            }
+
+            uint64_t abs_capture_time_ntp = 0u;
+            if (gAbsCaptureTime) {
+                srtc::NtpTime ntp = {};
+                srtc::getNtpTime(ntp);
+
+                abs_capture_time_ntp = (static_cast<uint64_t>(ntp.seconds) << 32u) | ntp.fraction;
+            }
+
+            peerConnection->publishVideoFrame(track, frame.pts_usec, frame.frame.copy(), abs_capture_time_ntp);
+
+            frame_count += 1;
+
+            if (!gQuiet && frame_count > 0 && (frame_count % 25) == 0) {
+                std::cout << "Played " << std::setw(5) << frame_count << " video frames" << std::endl;
+            }
+
+            if (gDataChannels && frame_count > 0 && (frame_count % 25) == 0) {
+                std::string msg;
+                if (msg_seq % 5 == 0) {
+                    msg = "Frame " + std::to_string(frame_count) + " (large): " + generateText(2000);
+                } else {
+                    msg = "Frame " + std::to_string(frame_count);
+                }
+                if (const auto err = peerConnection->sendDataChannelText("foo", std::move(msg)); err.isError()) {
+                    std::cout << "*** Data channel send error: " << err.message << std::endl;
+                }
+                msg_seq += 1;
+            }
+
+            if (gIsConnectionFailed) {
+                std::cout << "*** Connection failed, stopping video playback" << std::endl;
+                return;
+            }
+            if (gIsConnectionClosed) {
+                std::cout << "*** Connection has been closed, stopping video playback" << std::endl;
+                return;
+            }
+        }
+
+        if (gLoopVideo) {
+            std::cout << "Looping back to the beginning" << std::endl;
+        } else {
+            std::cout << "The input file has ended, we are done" << std::endl;
+            break;
+        }
+    }
+}
+
+void printUsage(const char* programName)
+{
+    std::cout << "Usage: " << programName << " [options]" << std::endl;
+    std::cout << "Options:" << std::endl;
+    std::cout << "  -f, --file <path>    Path to input file, H264/H265/WEBM (default: " << gInputFile << ")"
+              << std::endl;
+    std::cout << "  -u, --url <url>        WHIP server URL (default: " << gWhipUrl << ")" << std::endl;
+    std::cout << "  -t, --token <token>    WHIP authorization token" << std::endl;
+    std::cout << "  -l, --loop             Loop the file" << std::endl;
+    std::cout << "  -v, --verbose          Verbose logging from the srtc library" << std::endl;
+    std::cout << "  -q, --quiet            Suppress progress reporting" << std::endl;
+    std::cout << "  -s, --sdp              Print SDP offer and answer" << std::endl;
+    std::cout << "  -i, --info             Print input file info" << std::endl;
+    std::cout << "  -b, --bwe              Enable TWCC congestion control for bandwidth estimation" << std::endl;
+    std::cout << "  -c, --datachannels     Enable data channels" << std::endl;
+    std::cout << "  -a, --abs-capture-time Enable abs-capture-time" << std::endl;
+    std::cout << "  -h, --help             Show this help message" << std::endl;
+}
+
+int main(int argc, char* argv[])
+{
+    using namespace srtc;
+
+    // Set logging to errors by default
+    setLogLevel(SRTC_LOG_W);
+
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            printUsage(argv[0]);
+            return 0;
+        } else if (arg == "-f" || arg == "--file") {
+            if (i + 1 < argc) {
+                gInputFile = argv[++i];
+            } else {
+                std::cerr << "Error: -f/--file requires a file path" << std::endl;
+                return 1;
+            }
+        } else if (arg == "-u" || arg == "--url") {
+            if (i + 1 < argc) {
+                gWhipUrl = argv[++i];
+            } else {
+                std::cerr << "Error: -u/--url requires a URL" << std::endl;
+                return 1;
+            }
+        } else if (arg == "-t" || arg == "--token") {
+            if (i + 1 < argc) {
+                gAuthToken = argv[++i];
+            } else {
+                std::cerr << "Error: -t/--token requires a token value" << std::endl;
+                return 1;
+            }
+        } else if (arg == "-l" || arg == "--loop") {
+            gLoopVideo = true;
+        } else if (arg == "-v" || arg == "--verbose") {
+            srtc::setLogLevel(SRTC_LOG_V);
+        } else if (arg == "-q" || arg == "--quiet") {
+            gQuiet = true;
+        } else if (arg == "-s" || arg == "--sdp") {
+            gPrintSDP = true;
+        } else if (arg == "-i" || arg == "--info") {
+            gPrintInfo = true;
+        } else if (arg == "-b" || arg == "--bwe") {
+            gEnableBWE = true;
+        } else if (arg == "-c" || arg == "--datachannels") {
+            gDataChannels = true;
+        } else if (arg == "-a" || arg == "--abs-capture-time") {
+            gAbsCaptureTime = true;
+        } else {
+            std::cerr << "Unknown option: " << arg << std::endl;
+            printUsage(argv[0]);
+            return 1;
+        }
+    }
+
+    std::cout << "*** Using source file: " << gInputFile << std::endl;
+    std::cout << "*** Using WHIP URL:    " << gWhipUrl << std::endl;
+
+    char cwd[1024];
+#ifdef _WIN32
+    if (!GetCurrentDirectoryA(sizeof(cwd), cwd)) {
+        std::cout << "*** Cannot get current working directory" << std::endl;
+        exit(1);
+    }
+#else
+    if (!getcwd(cwd, sizeof(cwd))) {
+        std::cout << "*** Cannot get current working directory" << std::endl;
+        exit(1);
+    }
+#endif
+
+    std::cout << "*** Current working directory: " << cwd << std::endl;
+
+    // Read the file
+    const auto media_reader = MediaReader::create(gInputFile);
+    const auto media_file = media_reader->loadMedia(gPrintInfo);
+
+    // Peer connection state
+    std::mutex connectionStateMutex;
+    PeerConnection::ConnectionState connectionState = PeerConnection::ConnectionState::Inactive;
+    std::condition_variable connectionStateCond;
+
+    // Peer connection
+    auto connectedReported = false;
+    const auto ms0 = std::chrono::steady_clock::now();
+    const auto peerConnection = std::make_shared<PeerConnection>(Direction::Publish);
+
+    peerConnection->setConnectionStateListener(
+        [ms0, &connectedReported, &connectionStateMutex, &connectionState, &connectionStateCond](
+            const PeerConnection::ConnectionState& state) {
+            if (state == PeerConnection::ConnectionState::Connected && !connectedReported) {
+                const auto ms1 = std::chrono::steady_clock::now();
+                const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(ms1 - ms0).count();
+                std::cout << "*** PeerConnection state: " << connectionStateToString(state) << " in " << millis
+                          << " millis" << std::endl;
+                connectedReported = true;
+            } else {
+                std::cout << "*** PeerConnection state: " << connectionStateToString(state) << std::endl;
+            }
+
+            if (state == PeerConnection::ConnectionState::Failed) {
+                gIsConnectionFailed = true;
+            } else if (state == PeerConnection::ConnectionState::Closed) {
+                gIsConnectionClosed = true;
+            }
+
+            {
+                std::lock_guard lock(connectionStateMutex);
+                connectionState = state;
+            }
+            connectionStateCond.notify_one();
+        });
+
+    peerConnection->setPublishConnectionStatsListener([](const PublishConnectionStats& stats) {
+        std::cout << "*** PeerConnection stats: sent " << stats.frame_count << " frames, " << stats.packet_count
+                  << " packets, " << stats.byte_count << " bytes, act " << std::setprecision(6)
+                  << stats.bandwidth_actual_kbit_per_second << " kb/s, sugg " << std::setprecision(6)
+                  << stats.bandwidth_suggested_kbit_per_second << " kb/s, " << std::setprecision(3)
+                  << stats.packets_lost_percent << "% packet loss, " << std::setprecision(3) << stats.rtt_ms
+                  << " ms rtt" << std::endl;
+    });
+
+    // Data channel listener
+    if (gDataChannels) {
+        peerConnection->setDataChannelListener(std::make_shared<PublishDataChannelListener>());
+    }
+
+    // Offer
+    PubOfferConfig offer_config = {};
+    offer_config.cname = "foo";
+    offer_config.enable_rtx = true;
+    offer_config.enable_bwe = gEnableBWE;
+    offer_config.enable_abs_capture_time = gAbsCaptureTime;
+    if (gDataChannels) {
+        offer_config.data_channel_config.data_channels.emplace_back("foo");
+    }
+
+    PubCodec video_codec = {};
+    video_codec.codec = media_file.codec;
+    if (video_codec.codec == Codec::H264) {
+        video_codec.profile_level_id = 0x42e01f;
+    }
+
+    PubMediaItem media_item = {};
+    media_item.media_type = MediaType::Video;
+    media_item.media_id = "video_0";
+    media_item.codec_list.push_back(video_codec);
+
+    PubMediaConfig media_config = {};
+    media_config.media_list.push_back(media_item);
+
+    const auto [offer, offerCreateError] = peerConnection->createPublishOffer(offer_config, media_config);
+    if (offerCreateError.isError()) {
+        std::cout << "Error: cannot create offer: " << offerCreateError.message << std::endl;
+        exit(1);
+    }
+
+    const auto [offerString, offerStringError] = offer->generate();
+    if (offerStringError.isError()) {
+        std::cout << "Error: cannot generate offer: " << offerStringError.message << std::endl;
+        exit(1);
+    }
+    if (gPrintSDP) {
+        std::cout << "----- SDP offer -----\n" << offerString << std::endl;
+    }
+
+    // WHIP
+    const auto answerString = perform_whip_whep(offerString, gWhipUrl, gAuthToken);
+    if (gPrintSDP) {
+        std::cout << "----- SDP answer -----\n" << answerString << std::endl;
+    }
+
+    // Answer
+    const auto [answer, answerError] = peerConnection->parsePublishAnswer(offer, answerString, nullptr);
+    if (answerError.isError()) {
+        std::cout << "Error: cannot parse answer: " << answerError.message << std::endl;
+        exit(1);
+    }
+
+    // Connect the peer connection
+    if (const auto offerSetError = peerConnection->setOffer(offer); offerSetError.isError()) {
+        std::cout << "Error: cannot set offer: " << offerSetError.message << std::endl;
+        exit(1);
+    }
+
+    if (const auto answerSetError = peerConnection->setAnswer(answer); answerSetError.isError()) {
+        std::cout << "Error: cannot set answer: " << answerSetError.message << std::endl;
+        exit(1);
+    }
+
+    // Wait for connection to either be connected or fail
+    {
+        std::unique_lock lock(connectionStateMutex);
+        connectionStateCond.wait_for(lock, std::chrono::seconds(15), [&connectionState]() {
+            return connectionState == PeerConnection::ConnectionState::Connected ||
+                   connectionState == PeerConnection::ConnectionState::Failed;
+        });
+
+        if (connectionState != PeerConnection::ConnectionState::Connected) {
+            std::cout << "*** Failed to connect" << std::endl;
+            exit(1);
+        }
+    }
+
+    // Play the video
+    playVideoFile(peerConnection, media_file);
+
+    // Wait a little and exit
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    peerConnection->close();
+
+    return 0;
+}

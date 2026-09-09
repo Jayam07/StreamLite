@@ -1,0 +1,200 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'ver-*'
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04 # For better compatibility
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4 libcurl4-openssl-dev libssl-dev ninja-build
+
+      - name: Configure CMake
+        run: |
+          cmake \
+            -B ${{ github.workspace }}/build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -GNinja
+
+      - name: Build
+        run: |
+          cmake --build ${{github.workspace}}/build --target srtc_publish --target srtc_subscribe
+
+      - name: Package
+        run: |
+          mkdir -p release
+          cp ${{ github.workspace }}/build/srtc_publish release/
+          cp ${{ github.workspace }}/build/srtc_subscribe release/
+          cd release
+          strip srtc_publish || true
+          tar -czvf srtc_publish-linux.tar.gz srtc_publish
+          strip srtc_subscribe || true
+          tar -czvf srtc_subscribe-linux.tar.gz srtc_subscribe
+
+      - name: Upload publish
+        uses: actions/upload-artifact@v6
+        with:
+          name: srtc_publish-linux
+          path: release/srtc_publish-linux.tar.gz
+
+      - name: Upload subscribe
+        uses: actions/upload-artifact@v6
+        with:
+          name: srtc_subscribe-linux
+          path: release/srtc_subscribe-linux.tar.gz
+
+  build-macos:
+    runs-on: macos-15 # For better compatibility
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          brew install openssl curl ninja
+
+      - name: Configure CMake
+        run: |
+          cmake \
+            -B ${{ github.workspace }}/build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl) \
+            -GNinja
+
+      - name: Build
+        run: |
+          cmake --build ${{ github.workspace }}/build --target srtc_publish --target srtc_subscribe
+
+      - name: Package
+        run: |
+          mkdir -p release
+          cp ${{ github.workspace }}/build/srtc_publish release/
+          cp ${{ github.workspace }}/build/srtc_subscribe release/
+          cd release
+          strip srtc_publish || true
+          tar -czvf srtc_publish-macos.tar.gz srtc_publish
+          strip srtc_subscribe || true
+          tar -czvf srtc_subscribe-macos.tar.gz srtc_subscribe
+
+      - name: Upload publish
+        uses: actions/upload-artifact@v6
+        with:
+          name: srtc_publish-macos
+          path: release/srtc_publish-macos.tar.gz
+
+      - name: Upload subscribe
+        uses: actions/upload-artifact@v6
+        with:
+          name: srtc_subscribe-macos
+          path: release/srtc_subscribe-macos.tar.gz
+
+  build-windows:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Use the MSVC compiler
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure CMake
+        run: |
+          cmake `
+            -B ${{github.workspace}}/build `
+            -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} `
+            -DSRTC_BUILD_TESTS=OFF `
+            -GNinja
+
+      - name: Build
+        run: |
+          cmake `
+            --build ${{github.workspace}}/build `
+            --target srtc `
+            --target srtc_publish `
+            --target srtc_subscribe
+
+      - name: Package
+        run: |
+          mkdir -p release
+          cp ${{ github.workspace }}/build/srtc_publish.exe release/
+          cp ${{ github.workspace }}/build/srtc_subscribe.exe release/
+          cd release
+          7z a -tzip srtc_publish-windows.zip srtc_publish.exe
+          7z a -tzip srtc_subscribe-windows.zip srtc_subscribe.exe
+
+      - name: Upload publish
+        uses: actions/upload-artifact@v6
+        with:
+          name: srtc_publish-windows
+          path: release/srtc_publish-windows.zip
+
+      - name: Upload subscribe
+        uses: actions/upload-artifact@v6
+        with:
+          name: srtc_subscribe-windows
+          path: release/srtc_subscribe-windows.zip
+
+  video-files:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Package
+        run: |
+          mkdir -p release
+          cp ${{ github.workspace }}/*.h264 ${{ github.workspace }}/*.h265 ${{ github.workspace }}/*.webm release/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: video-files
+          path: release
+
+  create-release:
+    needs: [ build-linux, build-macos, build-windows, video-files ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            artifacts/srtc_publish-linux/srtc_publish-linux.tar.gz
+            artifacts/srtc_subscribe-linux/srtc_subscribe-linux.tar.gz
+            artifacts/srtc_publish-macos/srtc_publish-macos.tar.gz
+            artifacts/srtc_subscribe-macos/srtc_subscribe-macos.tar.gz
+            artifacts/srtc_publish-windows/srtc_publish-windows.zip
+            artifacts/srtc_subscribe-windows/srtc_subscribe-windows.zip
+            artifacts/video-files/sintel-av1.webm
+            artifacts/video-files/sintel-vp8.webm
+            artifacts/video-files/sintel.h264
+            artifacts/video-files/sintel_with_slices.h264
+            artifacts/video-files/sintel.h265
+            artifacts/video-files/sintel_with_slices.h265
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}

@@ -1,0 +1,148 @@
+name: Check builds
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  BUILD_TYPE: RelWithDebInfo
+
+jobs:
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-22.04, ubuntu-24.04, ubuntu-26.04 ]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Check compilers
+      run: |
+        which gcc
+        which g++
+        which clang
+        which clang++
+
+    - name: Install libcurl
+      run: |
+        sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev ninja-build
+
+        if [ "${{ matrix.os }}" = "ubuntu-24.04" ]
+        then
+          sudo apt-get install -y libcurl4t64
+        else
+          sudo apt-get install -y libcurl4
+        fi
+
+    - name: Configure CMake for gcc
+      run: |
+        cmake \
+          -B ${{ github.workspace }}/build-gcc \
+          -DCMAKE_C_COMPILER=/usr/bin/gcc \
+          -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+          -GNinja
+
+    - name: Build
+      run: |
+        cmake \
+          --build ${{ github.workspace }}/build-gcc \
+          --config ${{ env.BUILD_TYPE }} \
+          --target srtc \
+          --target srtc_test \
+          --target srtc_publish \
+          --target srtc_subscribe
+
+    - name: Test
+      run: |
+        ${{github.workspace}}/build-gcc/srtc_test
+
+    - name: Configure CMake for clang
+      run: |
+        cmake \
+          -B ${{ github.workspace }}/build-clang \
+          -DCMAKE_C_COMPILER=/usr/bin/clang \
+          -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+          -GNinja
+
+    - name: Build
+      run: |
+        cmake \
+          --build ${{ github.workspace }}/build-clang \
+          --config ${{ env.BUILD_TYPE }} \
+          --target srtc \
+          --target srtc_test \
+          --target srtc_publish \
+          --target srtc_subscribe
+
+    - name: Test
+      run: |
+        ${{github.workspace}}/build-clang/srtc_test
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install dependencies
+      run: |
+        brew install openssl curl ninja
+
+    - name: Configure CMake
+      run: |
+        cmake \
+          -B ${{github.workspace}}/build \
+          -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
+          -DOPENSSL_ROOT_DIR=$(brew --prefix openssl) \
+          -GNinja
+
+    - name: Build
+      run: |
+        cmake \
+          --build ${{github.workspace}}/build \
+          --config ${{env.BUILD_TYPE}} \
+          --target srtc \
+          --target srtc_test \
+        --target srtc_publish \
+        --target srtc_subscribe
+
+    - name: Test
+      run: |
+        ${{github.workspace}}/build/srtc_test
+
+  build-windows:
+    runs-on: windows-2022
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Use the MSVC compiler
+      uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Configure CMake
+      run: |
+        cmake `
+          -B ${{github.workspace}}/build `
+          -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} `
+          -GNinja
+
+    - name: Build
+      run: |
+        cmake `
+          --build ${{github.workspace}}/build `
+          --config ${{env.BUILD_TYPE}} `
+          --target srtc `
+          --target srtc_test `
+          --target srtc_publish `
+          --target srtc_subscribe
+
+    - name: Test
+      run: |
+        ${{github.workspace}}/build/srtc_test.exe

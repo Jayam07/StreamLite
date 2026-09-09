@@ -1,0 +1,125 @@
+#pragma once
+
+#include "srtc/simulcast_layer.h"
+#include "srtc/srtc.h"
+
+#include <memory>
+#include <string>
+
+namespace srtc
+{
+
+class RtcpPacketSource;
+class RtpTimeSource;
+class RtpPacketSource;
+class Media;
+class TrackStats;
+
+class Track
+{
+public:
+    struct SimulcastLayer : srtc::SimulcastLayer {
+        uint8_t index = { 0 }; // [0..3]
+    };
+
+    struct CodecOptions {
+        // Video
+        const uint32_t profileLevelId;
+        // Audio
+        const uint32_t minptime;
+        const bool stereo;
+
+        CodecOptions(int profileLevelId, int minptime, bool stereo)
+            : profileLevelId(profileLevelId)
+            , minptime(minptime)
+            , stereo(stereo)
+        {
+        }
+    };
+
+    Track(const std::shared_ptr<Media>& media,
+          Direction direction,
+          uint32_t ssrc,
+          uint8_t payloadId,
+          uint32_t rtxSsrc,
+          uint8_t rtxPayloadId,
+          Codec codec,
+          const std::shared_ptr<CodecOptions>& codecOptions,
+          const std::shared_ptr<SimulcastLayer>& simulcastLayer,
+          uint32_t clockRate,
+          bool hasNack,
+          bool hasPli);
+
+    [[nodiscard]] std::shared_ptr<Media> getMedia() const;
+    [[nodiscard]] MediaType getMediaType() const;
+    [[nodiscard]] Direction getDirection() const;
+    [[nodiscard]] uint8_t getPayloadId() const;
+    [[nodiscard]] uint8_t getRtxPayloadId() const;
+    [[nodiscard]] Codec getCodec() const;
+    [[nodiscard]] std::shared_ptr<CodecOptions> getCodecOptions() const;
+    [[nodiscard]] bool isSimulcast() const;
+    [[nodiscard]] std::shared_ptr<SimulcastLayer> getSimulcastLayer() const;
+    [[nodiscard]] uint32_t getClockRate() const;
+    [[nodiscard]] bool hasNack() const;
+    [[nodiscard]] bool hasPli() const;
+
+    [[nodiscard]] uint32_t getSSRC() const;
+    [[nodiscard]] uint32_t getRtxSSRC() const;
+
+    [[nodiscard]] std::shared_ptr<RtcpPacketSource> getRtcpPacketSource() const;
+    [[nodiscard]] std::shared_ptr<RtpTimeSource> getRtpTimeSource() const;
+    [[nodiscard]] std::shared_ptr<RtpPacketSource> getRtpPacketSource() const;
+    [[nodiscard]] std::shared_ptr<RtpPacketSource> getRtxPacketSource() const;
+
+    [[nodiscard]] std::shared_ptr<TrackStats> getStats() const;
+
+private:
+    const std::shared_ptr<Media> mMedia;
+    const Direction mDirection;
+    const uint32_t mSSRC;
+    const uint8_t mPayloadId;
+    const uint32_t mRtxSSRC;
+    const uint8_t mRtxPayloadId;
+    const Codec mCodec;
+    const std::shared_ptr<CodecOptions> mCodecOptions;
+    const std::shared_ptr<SimulcastLayer> mSimulcastLayer;
+    const uint32_t mClockRate;
+    const bool mHasNack;
+    const bool mHasPli;
+    const std::shared_ptr<RtcpPacketSource> mRtcpPacketSource;
+    const std::shared_ptr<RtpTimeSource> mRtpTimeSource;
+    const std::shared_ptr<RtpPacketSource> mRtpPacketSource;
+    const std::shared_ptr<RtpPacketSource> mRtxPacketSource;
+    const std::shared_ptr<TrackStats> mStats;
+};
+
+class TrackBuilder
+{
+public:
+    TrackBuilder(
+        const std::shared_ptr<Media>& media, Direction direction, uint32_t ssrc, uint8_t payloadId, uint32_t clockRate);
+
+    TrackBuilder& rtx(uint32_t rtxSsrc, uint8_t rtxPayloadId);
+    TrackBuilder& codec(Codec codec, const std::shared_ptr<Track::CodecOptions>& codecOptions);
+    TrackBuilder& simulcastLayer(const std::shared_ptr<Track::SimulcastLayer>& simulcastLayer);
+    TrackBuilder& nack(bool nack);
+    TrackBuilder& pli(bool pli);
+
+    [[nodiscard]] std::shared_ptr<Track> build() const;
+
+private:
+    const std::shared_ptr<Media> mMedia;
+    const Direction mDirection;
+    const uint32_t mSSRC;
+    const uint8_t mPayloadId;
+    const uint32_t mClockRate;
+    uint32_t mRtxSSRC;
+    uint8_t mRtxPayloadId;
+    Codec mCodec;
+    std::shared_ptr<Track::CodecOptions> mCodecOptions;
+    std::shared_ptr<Track::SimulcastLayer> mSimulcastLayer;
+    bool mHasNack;
+    bool mHasPli;
+};
+
+} // namespace srtc

@@ -1,0 +1,178 @@
+#include "srtc/send_pacer.h"
+#include "srtc/logging.h"
+#include "srtc/media.h"
+#include "srtc/rtp_extension_source_twcc.h"
+#include "srtc/rtp_packet.h"
+#include "srtc/send_rtp_history.h"
+#include "srtc/socket.h"
+#include "srtc/srtp_connection.h"
+#include "srtc/track.h"
+#include "srtc/track_stats.h"
+
+#include <algorithm>
+
+#define LOG(level, ...) srtc::log(level, "SendPacer", __VA_ARGS__)
+
+namespace srtc
+{
+
+SendPacer::SendPacer(const SdpOffer::Config& offerConfig,
+                     const std::shared_ptr<SrtpConnection>& srtp,
+                     const std::shared_ptr<Socket>& socket,
+                     const std::shared_ptr<SendRtpHistory>& history,
+                     const std::shared_ptr<RtpExtensionSourceTWCC>& twcc,
+                     const std::function<void()>& onSend)
+    : mOfferConfig(offerConfig)
+    , mSrtp(srtp)
+    , mSocket(socket)
+    , mHistory(history)
+    , mTWCC(twcc)
+    , mOnSend(onSend)
+#ifdef NDEBUG
+#else
+    , mLosePacketsRandomGenerator(0, 99)
+#endif
+{
+}
+
+SendPacer::~SendPacer() = default;
+
+void SendPacer::flush(const std::shared_ptr<Track>& track)
+{
+    size_t flushCount = 0;
+
+    for (auto iter = mQueue.begin(); iter != mQueue.end();) {
+        const auto packet = (*iter)->packet;
+        if (packet->getTrack()->getSSRC() == track->getSSRC()) {
+            iter = mQueue.erase(iter);
+            sendImpl(packet);
+            flushCount += 1;
+        } else {
+            ++iter;
+        }
+    }
+
+    (void)flushCount;
+
+    //	if (flushCount > 0) {
+    //		std::printf("*** Flushed %zu packets\n", flushCount);
+    //	}
+}
+
+void SendPacer::sendNow(const std::shared_ptr<RtpPacket>& packet)
+{
+    RtpPacket::SendInfo sendInfo = {};
+    sendInfo.is_last_packet_in_frame = true;
+
+    packet->setSendInfo(sendInfo);
+    sendImpl(packet);
+}
+
+void SendPacer::sendPaced(const std::vector<std::shared_ptr<RtpPacket>>& packetList, unsigned int spreadMillis)
+{
+    if (packetList.empty()) {
+        return;
+    }
+    const auto size = packetList.size();
+    if (size == 1) {
+        sendImpl(packetList.front());
+        return;
+    }
+
+    RtpPacket::SendInfo sendInfo = {};
+    sendInfo.is_last_packet_in_frame = true;
+    packetList.back()->setSendInfo(sendInfo);
+
+    if (spreadMillis == 0) {
+        for (const auto& packet : packetList) {
+            sendImpl(packet);
+        }
+        return;
+    }
+
+    // Delta = desired spread / number of packets
+    const auto delta = std::chrono::microseconds(1000 * spreadMillis / size);
+    const auto now = std::chrono::steady_clock::now();
+
+    unsigned int i = 0;
+    for (const auto& packet : packetList) {
+        const auto when = now + delta * i;
+        const auto item = std::make_shared<Item>(when, packet);
+
+        mQueue.insert(std::upper_bound(mQueue.begin(), mQueue.end(), item, ItemLess()), item);
+
+        i += 1;
+    }
+}
+
+[[nodiscard]] int SendPacer::getTimeoutMillis(int defaultValue) const
+{
+    if (!mQueue.empty()) {
+        const auto when = mQueue.front()->when;
+        const auto now = std::chrono::steady_clock::now();
+        const auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(when - now);
+        return static_cast<int>(diff.count());
+    }
+
+    return defaultValue;
+}
+
+void SendPacer::run()
+{
+    for (auto iter = mQueue.begin(); iter != mQueue.end();) {
+        if ((*iter)->when <= std::chrono::steady_clock::now()) {
+            const auto packet = (*iter)->packet;
+            iter = mQueue.erase(iter);
+            sendImpl(packet);
+        } else {
+            break;
+        }
+    }
+}
+
+void SendPacer::sendImpl(const std::shared_ptr<RtpPacket>& packet)
+{
+    if (mTWCC) {
+        mTWCC->onBeforeGeneratingRtpPacket(packet);
+    }
+
+    // Save
+    const auto track = packet->getTrack();
+    if (track->hasNack() || track->getRtxPayloadId() > 0) {
+        mHistory->save(packet);
+    }
+
+    // Stats
+    const auto stats = track->getStats();
+
+    // Send info
+    const auto sendInfo = packet->getSendInfo();
+
+    // Generate
+    const auto packetData = packet->generate();
+    ByteBuffer protectedData;
+    if (mSrtp->protectSendMedia(packetData.buf, packetData.rollover, protectedData)) {
+        // Keep stats
+        if (sendInfo.has_value() && sendInfo->is_last_packet_in_frame) {
+            stats->incrementSentFrames(1);
+        }
+
+        stats->incrementSentPackets(1);
+        stats->incrementSentBytes(protectedData.size());
+
+        // Record in TWCC
+        if (mTWCC) {
+            mTWCC->onBeforeSendingRtpPacket(packet, packetData.buf.size(), protectedData.size());
+        }
+
+        // Notify the sending callback
+        if (mOnSend) {
+            mOnSend();
+        }
+
+        // Send
+        (void)mSocket->send(protectedData.data(), protectedData.size());
+    }
+}
+
+} // namespace srtc

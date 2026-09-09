@@ -1,0 +1,75 @@
+#pragma once
+
+#include "srtc/byte_buffer.h"
+#include "srtc/error.h"
+#include "srtc/extension_map.h"
+#include "srtc/srtc.h"
+#include "srtc/x509_hash.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace srtc
+{
+
+class SdpOffer;
+class Media;
+class Track;
+class PeerConnection;
+class TrackSelector;
+class SdpAnswerParser;
+
+class SdpAnswer
+{
+private:
+    friend PeerConnection;
+	friend SdpAnswerParser;
+
+    static std::pair<std::shared_ptr<SdpAnswer>, Error> parse(const std::shared_ptr<SdpOffer>& offer,
+                                                              const std::string& answer,
+                                                              const std::shared_ptr<TrackSelector>& selector);
+
+public:
+    ~SdpAnswer();
+
+	[[nodiscard]] Direction getDirection() const;
+    [[nodiscard]] std::string getIceUFrag() const;
+    [[nodiscard]] std::string getIcePassword() const;
+    [[nodiscard]] std::vector<Host> getHostList() const;
+    [[nodiscard]] std::vector<std::shared_ptr<Media>> getMediaList() const;
+    [[nodiscard]] std::vector<std::shared_ptr<Track>> getTrackList() const;
+    [[nodiscard]] bool isSetupActive() const;
+    [[nodiscard]] bool isVideoSimulcast() const;
+    [[nodiscard]] const X509Hash& getCertificateHash() const;
+    [[nodiscard]] bool hasDataChannel() const;
+    [[nodiscard]] uint16_t getSctpPort() const;
+    [[nodiscard]] uint32_t getMaxMessageSize() const;
+
+private:
+	const Direction mDirection;
+    const std::string mIceUFrag;
+    const std::string mIcePassword;
+    const std::vector<Host> mHostList;
+    const std::vector<std::shared_ptr<Media>> mMediaList;
+    const std::vector<std::shared_ptr<Track>> mTrackList;
+    const bool mIsSetupActive;
+    const X509Hash mCertHash;
+    const bool mHasDataChannel;
+    const uint16_t mSctpPort;
+    const uint32_t mMaxMessageSize;
+
+    SdpAnswer(Direction direction,
+			  const std::string& iceUFrag,
+              const std::string& icePassword,
+              const std::vector<Host>& hostList,
+              const std::vector<std::shared_ptr<Media>>& mediaList,
+              const std::vector<std::shared_ptr<Track>>& trackList,
+              bool isSetupActive,
+              const X509Hash& certHash,
+              bool hasDataChannel,
+              uint16_t sctpPort,
+              uint32_t maxMessageSize);
+};
+
+} // namespace srtc

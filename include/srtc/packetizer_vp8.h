@@ -1,0 +1,23 @@
+#pragma once
+
+#include "srtc/byte_buffer.h"
+#include "srtc/packetizer_video.h"
+
+namespace srtc
+{
+
+class PacketizerVP8 final : public PacketizerVideo
+{
+public:
+    explicit PacketizerVP8(const std::shared_ptr<Track>& track);
+    ~PacketizerVP8() override;
+
+    [[nodiscard]] bool isKeyFrame(const ByteBuffer& frame) const override;
+    [[nodiscard]] std::vector<std::shared_ptr<RtpPacket>> generate(
+        const std::vector<std::shared_ptr<RtpExtensionSource>>& extensionSourceList,
+        size_t mediaProtectionOverhead,
+        int64_t pts_usec,
+        const ByteBuffer& frame) override;
+};
+
+} // namespace srtc
